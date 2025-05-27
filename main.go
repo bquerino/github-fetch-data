@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -7,18 +6,20 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strconv"
+	"sync"
 	"time"
 )
 
 const (
-	CSV_INPUT   = "repos.csv" // Arquivo CSV de entrada com IDs dos repositórios - deve ser ter uma coluna com repository_id e todos os ids
-	CSV_OUTPUT  = "resultado.csv" // Arquivo CSV de saída com os resultados
-	GITHUB_TOKEN = "ghp_xxxxx..." // Substitua com seu token
+	CSV_INPUT    = "repos.csv"     // Arquivo CSV de entrada com IDs dos repositórios - deve ser ter uma coluna com repository_id e todos os ids
+	CSV_OUTPUT   = "resultado.csv" // Arquivo CSV de saída com os resultados
+	GITHUB_TOKEN = "ghp_xxxxx..."  // Substitua com seu token
+	MAX_WORKERS  = 5
 )
 
 type Repository struct {
 	ID            int    `json:"id"`
+	Name          string `json:"name"`
 	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
 }
@@ -42,10 +43,7 @@ func main() {
 	}
 
 	total := len(repoIDs)
-	if total == 0 {
-		fmt.Println("Nenhum ID encontrado no arquivo de entrada.")
-		return
-	}
+	fmt.Printf("🔎 Total de repository_ids: %d\n", total)
 
 	outputFile, err := os.Create(CSV_OUTPUT)
 	if err != nil {
@@ -55,42 +53,30 @@ func main() {
 
 	writer := csv.NewWriter(outputFile)
 	defer writer.Flush()
-
 	writer.Write([]string{"repository_id", "repository_name", "author_name", "author_email"})
 
-	start := time.Now()
+	var wg sync.WaitGroup
+	tasks := make(chan string, MAX_WORKERS)
 
-	for i, id := range repoIDs {
-		fmt.Printf("🔍 [%d/%d] Processando ID: %s
-", i+1, total, id)
-
-		repo, err := fetchRepoByID(id)
-		if err != nil {
-			fmt.Printf("Erro ao buscar repositório %s: %v
-", id, err)
-			continue
-		}
-
-		commit, err := fetchLastCommit(repo.FullName, repo.DefaultBranch)
-		if err != nil {
-			fmt.Printf("Erro ao buscar commit de %s: %v
-", repo.FullName, err)
-			continue
-		}
-
-		authorName := commit.Commit.Author.Name
-		if commit.Author != nil && commit.Author.Login != "" {
-			authorName = commit.Author.Login
-		}
-
-		writer.Write([]string{id, repo.FullName, authorName, commit.Commit.Author.Email})
-
-		// Exibe progresso e estimativa
-		elapsed := time.Since(start)
-		remaining := time.Duration((float64(elapsed) / float64(i+1)) * float64(total-i-1))
-		fmt.Printf("✅ [%d/%d] %s - ETA: %s
-", i+1, total, repo.FullName, remaining.Round(time.Second))
+	// Workers
+	for i := 0; i < MAX_WORKERS; i++ {
+		go func(workerID int) {
+			for repoID := range tasks {
+				processRepository(repoID, writer)
+				wg.Done()
+			}
+		}(i)
 	}
+
+	start := time.Now()
+	for _, id := range repoIDs {
+		wg.Add(1)
+		tasks <- id
+	}
+	wg.Wait()
+	close(tasks)
+
+	fmt.Printf("✅ Concluído em %s\n", time.Since(start).Round(time.Second))
 }
 
 func readRepositoryIDs(path string) ([]string, error) {
@@ -118,52 +104,61 @@ func readRepositoryIDs(path string) ([]string, error) {
 	return ids, nil
 }
 
-func fetchRepoByID(id string) (*Repository, error) {
-	url := fmt.Sprintf("https://api.github.com/repositories/%s", id)
-	resp, err := makeGitHubRequest(url)
-	if err != nil {
-		return nil, err
-	}
+func processRepository(id string, writer *csv.Writer) {
+	// Busca repositório
+	repoURL := fmt.Sprintf("https://api.github.com/repositories/%s", id)
+	resp := makeGitHubRequest(repoURL)
 	defer resp.Body.Close()
 
 	var repo Repository
 	if err := json.NewDecoder(resp.Body).Decode(&repo); err != nil {
-		return nil, err
+		fmt.Printf("❌ [%s] Erro ao decodificar repositório: %v\n", id, err)
+		return
 	}
-	return &repo, nil
-}
 
-func fetchLastCommit(fullName, branch string) (*Commit, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/commits/%s", fullName, branch)
-	resp, err := makeGitHubRequest(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	// Busca commit
+	commitURL := fmt.Sprintf("https://api.github.com/repos/%s/commits/%s", repo.FullName, repo.DefaultBranch)
+	resp2 := makeGitHubRequest(commitURL)
+	defer resp2.Body.Close()
 
 	var commit Commit
-	if err := json.NewDecoder(resp.Body).Decode(&commit); err != nil {
-		return nil, err
+	if err := json.NewDecoder(resp2.Body).Decode(&commit); err != nil {
+		fmt.Printf("❌ [%s] Erro ao buscar commit: %v\n", repo.FullName, err)
+		return
 	}
-	return &commit, nil
+
+	authorName := commit.Commit.Author.Name
+	if commit.Author != nil && commit.Author.Login != "" {
+		authorName = commit.Author.Login
+	}
+
+	writer.Write([]string{
+		id,
+		repo.FullName,
+		authorName,
+		commit.Commit.Author.Email,
+	})
+	writer.Flush()
+
+	fmt.Printf("✅ [%s] Último commit por %s\n", repo.FullName, authorName)
 }
 
-func makeGitHubRequest(url string) (*http.Response, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+func makeGitHubRequest(url string) *http.Response {
+	client := &http.Client{Timeout: 15 * time.Second}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
-	req.Header.Set("Authorization", "token " + GITHUB_TOKEN)
+	req.Header.Set("Authorization", "token "+GITHUB_TOKEN)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("status %d for %s", resp.StatusCode, url)
+		panic(fmt.Sprintf("Erro %d ao acessar %s", resp.StatusCode, url))
 	}
-	return resp, nil
+	return resp
 }
