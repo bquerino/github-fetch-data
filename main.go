@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -6,13 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 )
 
 const (
-	inputCSV    = "repos.csv"     // Arquivo CSV de entrada com IDs dos repositórios - deve ser ter uma coluna com repository_id e todos os ids
-	outputCSV   = "resultado.csv" // Arquivo CSV de saída com os resultados
-	githubToken = "ghp_xxxxx..."  // Substitua pelo seu token
+	CSV_INPUT   = "repos.csv" // Arquivo CSV de entrada com IDs dos repositórios - deve ser ter uma coluna com repository_id e todos os ids
+	CSV_OUTPUT  = "resultado.csv" // Arquivo CSV de saída com os resultados
+	GITHUB_TOKEN = "ghp_xxxxx..." // Substitua com seu token
 )
 
 type Repository struct {
@@ -34,12 +36,18 @@ type Commit struct {
 }
 
 func main() {
-	ids, err := readRepositoryIDs(inputCSV)
+	repoIDs, err := readRepositoryIDs(CSV_INPUT)
 	if err != nil {
 		panic(err)
 	}
 
-	outputFile, err := os.Create(outputCSV)
+	total := len(repoIDs)
+	if total == 0 {
+		fmt.Println("Nenhum ID encontrado no arquivo de entrada.")
+		return
+	}
+
+	outputFile, err := os.Create(CSV_OUTPUT)
 	if err != nil {
 		panic(err)
 	}
@@ -50,16 +58,23 @@ func main() {
 
 	writer.Write([]string{"repository_id", "repository_name", "author_name", "author_email"})
 
-	for _, id := range ids {
+	start := time.Now()
+
+	for i, id := range repoIDs {
+		fmt.Printf("🔍 [%d/%d] Processando ID: %s
+", i+1, total, id)
+
 		repo, err := fetchRepoByID(id)
 		if err != nil {
-			fmt.Printf("Erro ao buscar repo %s: %v\n", id, err)
+			fmt.Printf("Erro ao buscar repositório %s: %v
+", id, err)
 			continue
 		}
 
 		commit, err := fetchLastCommit(repo.FullName, repo.DefaultBranch)
 		if err != nil {
-			fmt.Printf("Erro ao buscar commit de %s: %v\n", repo.FullName, err)
+			fmt.Printf("Erro ao buscar commit de %s: %v
+", repo.FullName, err)
 			continue
 		}
 
@@ -68,12 +83,13 @@ func main() {
 			authorName = commit.Author.Login
 		}
 
-		writer.Write([]string{
-			id,
-			repo.FullName,
-			authorName,
-			commit.Commit.Author.Email,
-		})
+		writer.Write([]string{id, repo.FullName, authorName, commit.Commit.Author.Email})
+
+		// Exibe progresso e estimativa
+		elapsed := time.Since(start)
+		remaining := time.Duration((float64(elapsed) / float64(i+1)) * float64(total-i-1))
+		fmt.Printf("✅ [%d/%d] %s - ETA: %s
+", i+1, total, repo.FullName, remaining.Round(time.Second))
 	}
 }
 
@@ -93,7 +109,7 @@ func readRepositoryIDs(path string) ([]string, error) {
 	var ids []string
 	for i, row := range records {
 		if i == 0 {
-			continue // skip header
+			continue // Skip header
 		}
 		if len(row) > 0 {
 			ids = append(ids, row[0])
@@ -139,7 +155,7 @@ func makeGitHubRequest(url string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "token "+githubToken)
+	req.Header.Set("Authorization", "token " + GITHUB_TOKEN)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := client.Do(req)
