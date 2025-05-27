@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	CSV_INPUT    = "repos.csv"     // Arquivo CSV de entrada com IDs dos repositórios - deve ser ter uma coluna com repository_id e todos os ids
-	CSV_OUTPUT   = "resultado.csv" // Arquivo CSV de saída com os resultados
-	GITHUB_TOKEN = "ghp_xxxxx..."  // Substitua com seu token
+	CSV_INPUT    = "repos.csv"
+	CSV_OUTPUT   = "resultado.csv"
+	GITHUB_TOKEN = "ghp_xxxxx..." // Substitua com seu token
 	MAX_WORKERS  = 5
 )
 
@@ -107,22 +107,38 @@ func readRepositoryIDs(path string) ([]string, error) {
 func processRepository(id string, writer *csv.Writer) {
 	// Busca repositório
 	repoURL := fmt.Sprintf("https://api.github.com/repositories/%s", id)
-	resp := makeGitHubRequest(repoURL)
+	resp, err := makeGitHubRequest(repoURL)
+	if err != nil {
+		writer.Write([]string{id, "Not Found", "-", "-"})
+		writer.Flush()
+		fmt.Printf("⚠️  [%s] Repositório não encontrado ou erro: %v\n", id, err)
+		return
+	}
 	defer resp.Body.Close()
 
 	var repo Repository
 	if err := json.NewDecoder(resp.Body).Decode(&repo); err != nil {
+		writer.Write([]string{id, "Erro ao decodificar", "-", "-"})
+		writer.Flush()
 		fmt.Printf("❌ [%s] Erro ao decodificar repositório: %v\n", id, err)
 		return
 	}
 
 	// Busca commit
 	commitURL := fmt.Sprintf("https://api.github.com/repos/%s/commits/%s", repo.FullName, repo.DefaultBranch)
-	resp2 := makeGitHubRequest(commitURL)
+	resp2, err := makeGitHubRequest(commitURL)
+	if err != nil {
+		writer.Write([]string{id, repo.FullName, "Commit não encontrado", "-"})
+		writer.Flush()
+		fmt.Printf("⚠️  [%s] Commit não encontrado: %v\n", repo.FullName, err)
+		return
+	}
 	defer resp2.Body.Close()
 
 	var commit Commit
 	if err := json.NewDecoder(resp2.Body).Decode(&commit); err != nil {
+		writer.Write([]string{id, repo.FullName, "Erro no commit", "-"})
+		writer.Flush()
 		fmt.Printf("❌ [%s] Erro ao buscar commit: %v\n", repo.FullName, err)
 		return
 	}
@@ -143,22 +159,25 @@ func processRepository(id string, writer *csv.Writer) {
 	fmt.Printf("✅ [%s] Último commit por %s\n", repo.FullName, authorName)
 }
 
-func makeGitHubRequest(url string) *http.Response {
+func makeGitHubRequest(url string) (*http.Response, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	req.Header.Set("Authorization", "token "+GITHUB_TOKEN)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		panic(err)
+		return nil, err
+	}
+	if resp.StatusCode == 404 {
+		return nil, fmt.Errorf("404 not found: %s", url)
 	}
 	if resp.StatusCode >= 300 {
-		panic(fmt.Sprintf("Erro %d ao acessar %s", resp.StatusCode, url))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, url)
 	}
-	return resp
+	return resp, nil
 }
